@@ -1,0 +1,4 @@
+__pycache__/
+*.py[cod]
+# A venv made next to the clone, as the README shows.
+/.venv/

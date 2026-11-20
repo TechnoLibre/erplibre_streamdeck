@@ -1,0 +1,286 @@
+# © 2026 TechnoLibre (http://www.technolibre.ca)
+# License AGPL-3.0 or later (http://www.gnu.org/licenses/agpl)
+"""Start of the deck program: find the deck, build the kernel, run.
+
+build() is what a test drives: the style restored from settings.json,
+the plugins loaded, the home layout of the deck's model read from
+keymap.json, the kernel made, without the lock file, the signal handler
+or the loop thread.
+
+main() outlives its deck. When the library closes a deck that vanished,
+the plugins are shut down, DeviceManager is polled every
+REPLUG_POLL_SEC (more seldom for a deck that keeps vanishing as soon as
+it is back, see FLAP_SEC), and the first visual deck that answers gets
+a new kernel built with the same settings. The process, and the deck lock its
+caller took, stay for the whole wait; a SIGTERM or a Ctrl-C ends it."""
+
+import subprocess
+import sys
+import threading
+import time
+
+try:
+    from StreamDeck.DeviceManager import DeviceManager
+    from StreamDeck.Transport.Transport import TransportError
+except ImportError as e:
+    from erplibre_streamdeck import paths as _paths
+
+    print(f"pip install -r {_paths.DECK_DIR / 'requirements.txt'}")
+    raise e
+
+import deck_lock
+
+from erplibre_streamdeck import keymap, loader, paths
+from erplibre_streamdeck import settings as settings_mod
+from erplibre_streamdeck.kernel import Kernel
+from erplibre_streamdeck.plugin import Geometry
+from erplibre_streamdeck.ui import icons, render
+
+# How long the shutdown waits for the kernel lock. A key callback holds
+# it across a blocking plugin call (a dialog may wait minutes); past
+# this delay the plugins are shut down without it, so the deck is reset
+# before systemd's stop timeout kills the service.
+SHUTDOWN_LOCK_SEC = 5.0
+# While no deck is plugged in, DeviceManager is asked this often.
+REPLUG_POLL_SEC = 2.0
+# A deck back that closes again within FLAP_SEC doubles the next wait's
+# poll, up to REPLUG_MAX_SEC: each rebuild runs every plugin setup and
+# writes two journal lines. A deck that stays FLAP_SEC resets it.
+FLAP_SEC = 10.0
+REPLUG_MAX_SEC = 30.0
+# How often main() checks that its deck is still open.
+OPEN_POLL_SEC = 0.5
+BRIGHTNESS = 80
+
+
+def _journal(msg):
+    print(f"[erplibre-home] {msg}", file=sys.stderr, flush=True)
+
+
+DECK_SETTING_DEFAULTS = {"plugins_off": [], "session_refresh_sec": 1.0}
+
+# One bash call: the plugin ids, one "off=<id>" line each, then one
+# "refresh=<seconds>" line, both validated by the settings library.
+_READ_SCRIPT = (
+    '. "$0" && deck_plugins_off | sed \'s/^/off=/\' '
+    '&& echo "refresh=$(deck_session_refresh_sec)"'
+)
+
+
+def read_deck_settings():
+    """The deck's settings from streamdeck.conf, read by the settings
+    library the installer and the service use: {"plugins_off": [ids],
+    "session_refresh_sec": float}. The defaults come back, with one
+    journal line carrying the library's stderr, when the library cannot
+    be read: bash missing, too slow, or failing. Without an ERPLibre
+    checkout (paths.SETTINGS_LIB None) there is no library: the defaults,
+    with one journal line naming ERPLIBRE_ROOT."""
+    if paths.SETTINGS_LIB is None:
+        _journal(
+            "deck settings: no ERPLibre checkout, defaults"
+            f" (set {paths.ERPLIBRE_ROOT_ENV} to read streamdeck.conf)"
+        )
+        return dict(DECK_SETTING_DEFAULTS, plugins_off=[])
+    try:
+        done = subprocess.run(
+            ["bash", "-c", _READ_SCRIPT, str(paths.SETTINGS_LIB)],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        _journal(f"deck settings unreadable: {exc}")
+        return dict(DECK_SETTING_DEFAULTS, plugins_off=[])
+    if done.returncode != 0:
+        _journal(
+            f"deck settings unreadable: exit {done.returncode}: "
+            f"{done.stderr.strip()}"
+        )
+        return dict(DECK_SETTING_DEFAULTS, plugins_off=[])
+    result = dict(DECK_SETTING_DEFAULTS, plugins_off=[])
+    for line in done.stdout.splitlines():
+        if line.startswith("off=") and line[4:]:
+            result["plugins_off"].append(line[4:])
+        elif line.startswith("refresh="):
+            try:
+                result["session_refresh_sec"] = float(line[8:])
+            except ValueError:
+                _journal(f"deck settings: bad refresh line {line!r}")
+    return result
+
+
+def home_layout(deck, plugins):
+    """The keymap.json layout of `deck`'s model (its USB product id as 4
+    lowercase hex digits) for the loaded `plugins`, or None for the
+    automatic one; its problems are journaled, keymap.capped."""
+    model = f"{deck.product_id():04x}"
+    rows, cols = deck.key_layout()
+    layout, problems = keymap.layout_for(
+        keymap.load(),
+        model,
+        Geometry(cols, rows, cols * rows),
+        {lp.id for lp in plugins if lp.plugin.home_button is not None},
+        set(icons.ICONS),
+    )
+    for line in keymap.capped(problems):
+        _journal(f"keymap: {line}")
+    if layout is not None:
+        _journal(f"keymap: layout {model}, {len(layout)} keys named")
+    return layout
+
+
+def build(deck, *, plugins_off=(), user_dir=None, settings=None):
+    render.STYLE.restore(settings_mod.load())
+    plugins, report = loader.load(off=plugins_off, user_dir=user_dir)
+    for entry in report.entries:
+        if entry[1] != "active":
+            _journal(f"plugin {loader.Report.line(*entry)}")
+    kernel = Kernel(deck, plugins, settings, home_layout(deck, plugins))
+    for pid, reason in kernel.refused:
+        _journal(f"plugin {pid}: refused: {reason}")
+    return kernel
+
+
+def _shutdown_plugins(kernel):
+    """Shut the plugins down under the kernel lock, or without it after
+    SHUTDOWN_LOCK_SEC (one journal line)."""
+    kernel.running = False
+    locked = kernel.lock.acquire(timeout=SHUTDOWN_LOCK_SEC)
+    if not locked:
+        _journal(
+            f"kernel lock still held after {SHUTDOWN_LOCK_SEC:g} s: "
+            "shutting the plugins down without it"
+        )
+    try:
+        kernel.shutdown()
+    finally:
+        if locked:
+            kernel.lock.release()
+
+
+def _shutdown(kernel, deck):
+    """Shut the plugins down, then reset and close the deck whatever the
+    shutdown raises. Either may be None: no kernel built yet, or no deck
+    held. A deck that vanished cannot be reset: the library's
+    TransportError is one journal line, not a traceback."""
+    try:
+        if kernel is not None:
+            _shutdown_plugins(kernel)
+    finally:
+        if deck is not None:
+            try:
+                with deck:
+                    deck.reset()
+                    deck.close()
+            except TransportError as exc:
+                _journal(f"Stream Deck not reset: {exc}")
+
+
+def _first_visual():
+    """The first visual deck DeviceManager lists, not opened; None when
+    there is none."""
+    decks = DeviceManager().enumerate()
+    return next((d for d in decks if d.is_visual()), None)
+
+
+def _open(deck):
+    deck.open()
+    deck.reset()
+    deck.set_brightness(BRIGHTNESS)
+
+
+def _wait_for_deck(poll_sec):
+    """Poll every `poll_sec` until a visual deck opens; return it
+    opened, reset and lit. A deck that fails to open, still settling
+    after its plug or refused by its device node, is closed and tried
+    again at the next poll; its error is journaled once, and again only
+    when it changes, so a deck plugged in but refused reads apart from
+    an unplugged one."""
+    note = ""
+    if poll_sec != REPLUG_POLL_SEC:
+        note = f", looking every {poll_sec:g} s"
+    _journal(f"Stream Deck unplugged, waiting for it to come back{note}")
+    refused = None
+    while True:
+        time.sleep(poll_sec)
+        deck = _first_visual()
+        if deck is None:
+            continue
+        try:
+            _open(deck)
+        except TransportError as exc:
+            deck.close()
+            if str(exc) != refused:
+                refused = str(exc)
+                _journal(
+                    f"Stream Deck found but not opened: {exc}; trying "
+                    f"again every {poll_sec:g} s"
+                )
+            continue
+        return deck
+
+
+def _run(deck, deck_settings):
+    """Build a kernel on an opened deck, render it, bind the key
+    callback and start the loop thread; return the kernel."""
+    kernel = build(
+        deck,
+        plugins_off=deck_settings["plugins_off"],
+        settings={
+            "session_refresh_sec": deck_settings["session_refresh_sec"]
+        },
+    )
+    kernel.guard("kernel", "first render", kernel.render)
+    deck.set_key_callback(kernel.on_key)
+    threading.Thread(target=kernel.loop, daemon=True).start()
+    return kernel
+
+
+def main():
+    deck = _first_visual()
+    if not deck:
+        print("No visual Stream Deck found.")
+        sys.exit(deck_lock.NO_DECK_EXIT)
+
+    # From the first open on, `deck` is the deck to reset and `kernel`
+    # the plugins to shut down, None for what is not there: a SIGTERM
+    # while a kernel builds still resets the deck already lit. While no
+    # deck is plugged in, both are None: the plugins are already shut
+    # down and there is no deck to reset.
+    kernel = None
+    # The poll of the next wait, and when the kernel of the deck now
+    # held was up (None for the deck found at start, which never counts
+    # as a flap).
+    poll_sec, back_at = REPLUG_POLL_SEC, None
+    try:
+        _open(deck)
+        rows, cols = deck.key_layout()
+        print(f"Window Tiler on {deck.deck_type()} ({cols}x{rows})")
+
+        deck_settings = read_deck_settings()
+        kernel = _run(deck, deck_settings)
+        if kernel.dbus_ok:
+            print("D-Bus tiler extension detected!")
+        else:
+            print("WARNING: erplibre-home extension not found.",
+                  file=sys.stderr, flush=True)
+            print("Install: re-login to GNOME to activate the extension.")
+        print("Press TILE to enter tiling mode (first corner, second corner).")
+        print("Press TIMER to list and toggle tracker timers.")
+
+        while True:
+            while deck.is_open():
+                time.sleep(OPEN_POLL_SEC)
+            gone, kernel, deck = kernel, None, None
+            _shutdown_plugins(gone)
+            if back_at is not None and time.monotonic() - back_at < FLAP_SEC:
+                poll_sec = min(poll_sec * 2, REPLUG_MAX_SEC)
+            else:
+                poll_sec = REPLUG_POLL_SEC
+            deck = _wait_for_deck(poll_sec)
+            kernel = _run(deck, deck_settings)
+            back_at = time.monotonic()
+            rows, cols = deck.key_layout()
+            _journal(f"Stream Deck back: {deck.deck_type()} ({cols}x{rows})")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _shutdown(kernel, deck)
