@@ -18,9 +18,23 @@ Ce que ces tests gardent :
 - un lien à la place du verrou, ou un dossier ouvert aux autres comptes,
   est refusé sans rien écrire ; holder() n'y lit rien non plus, ne bloque
   pas sur une FIFO et ne rend qu'un PID fait de chiffres ;
+- deck_lock.py lancé en commande tient le verrou au nom de « game » et le
+  passe à la commande : tant qu'un processus du jeu vit, le deck reste
+  pris, l'enveloppe fût-elle tuée ; il rend le code de la commande ;
+- SIGTERM ou SIGINT envoyé à l'enveloppe atteint tous ses descendants, un
+  jeu lancé sous un shell compris, et l'enveloppe attend leur fin ; SIGINT
+  épargne ceux que le terminal a déjà frappés ;
+- un programme du deck lancé sous le jeu tourne sous son verrou, et le
+  reprend à son compte s'il survit au jeu sans en avoir hérité ; hérité
+  ou repris, le verrou écarte tout autre programme dès la fin du jeu ;
 - le texte porte l'instant de départ du détenteur, troisième champ
-  facultatif, et holder_running() dit si le PID nommé désigne encore son
-  auteur ;
+  facultatif : un ancêtre qui a repris le PID d'une enveloppe morte n'est
+  pas pris pour le jeu, et holder_running() dit si le PID nommé désigne
+  encore son auteur ;
+- deux programmes du deck dans un même jeu s'excluent par deck.inner ;
+  l'un après l'autre, ils tournent ; l'enveloppe ne le prend pas, et hors
+  jeu il n'est jamais lu ; il se crée privé comme le verrou, et un enfant
+  du programme qui le tient ne le garde pas ;
 - SIGTERM devient SystemExit : les finally et atexit d'un programme du
   deck passent ;
 - le tiler et le contrôleur prennent le verrou avant d'ouvrir le deck,
@@ -37,6 +51,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -142,9 +157,9 @@ class Verrou(unittest.TestCase):
         )
 
     def test_a_holder_leaving_during_acquire_hands_the_lock_over(self):
-        """Le détenteur sort entre l'échec du flock et la lecture de son
-        texte : le second essai d'acquire() prend le verrou au lieu de
-        nommer un détenteur parti."""
+        """Le détenteur sort entre l'échec du flock et la recherche d'un
+        descripteur hérité : acquire() prend le verrou par son propre
+        fichier, au lieu de rouvrir un descripteur qu'il vient de fermer."""
         premier = self.detenteur("tiler")
         lire = self.deck_lock.parse_holder
 
@@ -316,13 +331,13 @@ class LeDetenteurNomme(unittest.TestCase):
 
     def test_the_start_time_must_match(self):
         for tenu, attendu in (
-            (("123", "tiler", "5555"), True),
-            (("123", "tiler", "6666"), False),
-            (("123", "tiler", "?"), False),
-            (("123", "tiler", None), True),
-            (("124", "tiler", "5555"), False),
-            (("125", "tiler", None), False),
-            (("?", "tiler", None), False),
+            (("123", "game", "5555"), True),
+            (("123", "game", "6666"), False),
+            (("123", "game", "?"), False),
+            (("123", "game", None), True),
+            (("124", "game", "5555"), False),
+            (("125", "game", None), False),
+            (("?", "game", None), False),
         ):
             with self.subTest(tenu=tenu):
                 self.assertEqual(
@@ -338,6 +353,675 @@ class LeDetenteurNomme(unittest.TestCase):
                 self.deck_lock.holder(os.path.join(dossier, "x"))
             )
         )
+
+
+# Un programme python qui écrit le détenteur vu de l'intérieur de la
+# commande, le PID de son parent et l'instant de départ de celui-ci :
+# argv = dossier du module, chemin.
+VU_DEDANS = (
+    "import os, sys; sys.path.insert(0, sys.argv[1]); import deck_lock;"
+    " p = os.getppid();"
+    " d = open('/proc/%d/stat' % p).read().rsplit(')', 1)[1].split()[19];"
+    " print(deck_lock.holder(sys.argv[2]), p, d)"
+)
+
+
+# Un programme du deck qui prend le verrou puis reste : argv = dossier du
+# module, programme, chemin.
+RESTER = (
+    "import sys, time; sys.path.insert(0, sys.argv[1]); import deck_lock;"
+    " deck_lock.acquire_or_exit(sys.argv[2], sys.argv[3]);"
+    " print('pret', flush=True); time.sleep(30)"
+)
+
+
+# Un programme du deck qui prend le verrou, lance sans fermer ses
+# descripteurs un enfant qui lui survit, puis sort en écrivant le PID de
+# l'enfant : argv = dossier du module, chemin.
+LAISSER_UN_ENFANT = (
+    "import subprocess, sys; sys.path.insert(0, sys.argv[1]);"
+    " import deck_lock; deck_lock.acquire_or_exit('tiler', sys.argv[2]);"
+    " e = subprocess.Popen(['sleep', '30'], close_fds=False,"
+    " stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,"
+    " stderr=subprocess.DEVNULL); print(e.pid)"
+)
+
+# Un jeu qui lance LAISSER_UN_ENFANT, puis, l'enfant vivant, un second
+# programme du deck ; il écrit « vivant <code> <sortie> » du second et tue
+# l'enfant. argv = close_fds des deux lancements, python, LAISSER_UN_ENFANT,
+# PRENDRE, dossier du module, chemin.
+APRES_UN_ENFANT = """
+import os, signal, subprocess, sys
+cf = sys.argv[1] == "True"
+py, laisser, prendre, dossier, chemin = sys.argv[2:]
+premier = subprocess.run(
+    [py, "-c", laisser, dossier, chemin],
+    stdin=subprocess.DEVNULL, capture_output=True, close_fds=cf, text=True,
+)
+enfant = int(premier.stdout)
+try:
+    os.kill(enfant, 0)
+    second = subprocess.run(
+        [py, "-c", prendre, dossier, "controller", chemin],
+        stdin=subprocess.DEVNULL, capture_output=True, close_fds=cf,
+        text=True,
+    )
+    print("vivant", second.returncode, second.stdout.strip(), second.stderr)
+finally:
+    os.kill(enfant, signal.SIGKILL)
+"""
+
+
+def vivant(pid):
+    """Le processus `pid` existe et n'est pas un zombie."""
+    try:
+        with open("/proc/%d/stat" % pid, encoding="utf-8") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] not in "ZX"
+    except OSError:
+        return False
+
+
+def tuer(pid):
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    for _fois in range(200):
+        if not vivant(pid):
+            return
+        time.sleep(0.05)
+
+
+class LaCommandeSousVerrou(unittest.TestCase):
+    """deck_lock.py <programme> <commande…> : ce que la passation lance."""
+
+    def setUp(self):
+        dossier = tempfile.TemporaryDirectory()
+        self.addCleanup(dossier.cleanup)
+        self.run_dir = dossier.name
+        self.chemin = os.path.join(self.run_dir, "erplibre-home", "deck.lock")
+        self.deck_lock = charger()
+        self.environ = dict(os.environ, XDG_RUNTIME_DIR=self.run_dir)
+
+    def lancer(self, *commande, **kw):
+        return subprocess.run(
+            [sys.executable, str(DECK_DIR / "deck_lock.py"), *commande],
+            capture_output=True,
+            text=True,
+            env=self.environ,
+            timeout=30,
+            **kw,
+        )
+
+    def test_the_command_runs_under_the_lock_as_game(self):
+        fini = self.lancer(
+            "game", sys.executable, "-c", VU_DEDANS, str(DECK_DIR), self.chemin
+        )
+        self.assertEqual(0, fini.returncode, fini.stderr)
+        tenu, parent, depart = fini.stdout.rsplit(" ", 2)
+        self.assertEqual(str((parent, "game", depart.strip())), tenu)
+        self.assertIsNone(self.deck_lock.holder(self.chemin))
+
+    def test_the_exit_code_and_a_signal_pass_through(self):
+        self.assertEqual(
+            7, self.lancer("game", "sh", "-c", "exit 7").returncode
+        )
+        self.assertEqual(
+            128 + signal.SIGTERM,
+            self.lancer("game", "sh", "-c", "kill -TERM $$").returncode,
+        )
+
+    def test_a_missing_command_says_so(self):
+        fini = self.lancer("game", os.path.join(self.run_dir, "absent"))
+        self.assertEqual(127, fini.returncode)
+        self.assertIn("absent", fini.stderr)
+
+    def test_no_command_is_a_usage_error(self):
+        fini = self.lancer("game")
+        self.assertEqual(1, fini.returncode)
+        self.assertIn("usage", fini.stderr)
+
+    def test_a_child_left_behind_keeps_the_deck(self):
+        """Le descripteur du verrou passe à la commande et à ses enfants : un
+        processus que le jeu laisse derrière lui tient encore le deck, et le
+        service relancé sort en 2 au lieu de s'y superposer."""
+        fini = self.lancer(
+            "game", "sh", "-c", "sleep 30 >/dev/null 2>&1 & echo $!"
+        )
+        orphelin = int(fini.stdout)
+        self.addCleanup(tuer, orphelin)
+        self.assertEqual(0, fini.returncode, fini.stderr)
+        self.assertEqual("game", self.deck_lock.holder(self.chemin)[1])
+        tuer(orphelin)
+        self.attendre_le_verrou_libre()
+
+    def test_the_deck_stays_locked_when_the_wrapper_is_killed(self):
+        marque = os.path.join(self.run_dir, "jeu.pid")
+        jeu = self.envelopper(
+            "sh", "-c", 'echo $$ > "$0"; exec sleep 30', marque
+        )
+        pid = self.lire_pid(marque)
+        self.addCleanup(tuer, pid)
+        jeu.kill()
+        jeu.wait(10)
+        self.assertEqual(
+            (str(jeu.pid), "game"), self.deck_lock.holder(self.chemin)[:2]
+        )
+        tuer(pid)
+        self.attendre_le_verrou_libre()
+
+    def test_a_busy_deck_runs_nothing_and_exits_two(self):
+        tenu = self.deck_lock.acquire("tiler", self.chemin)
+        self.addCleanup(tenu.close)
+        marque = os.path.join(self.run_dir, "marque")
+        fini = self.lancer("game", "touch", marque)
+        self.assertEqual(2, fini.returncode)
+        self.assertIn("tiler", fini.stderr)
+        self.assertFalse(os.path.exists(marque))
+
+    def test_a_deck_program_under_the_command_shares_its_lock(self):
+        """Un programme du deck lancé dans un jeu, par TODO (enfant direct)
+        ou la galerie (sous bash) : il trouve le verrou tenu par un ancêtre
+        au nom de « game » et tourne au lieu de sortir en 2."""
+        prendre = PRENDRE.format(fonction="acquire_or_exit")
+        for commande in (
+            [sys.executable, "-c", prendre, str(DECK_DIR), "tiler"],
+            [
+                "sh",
+                "-c",
+                '"$@"',
+                "sh",
+                sys.executable,
+                "-c",
+                prendre,
+                str(DECK_DIR),
+                "tiler",
+            ],
+        ):
+            with self.subTest(commande=commande[0]):
+                fini = self.lancer(
+                    "game", *commande, self.chemin, stdin=subprocess.DEVNULL
+                )
+                self.assertEqual(0, fini.returncode, fini.stderr)
+                self.assertEqual("pret\n", fini.stdout)
+
+    def test_a_deck_program_outside_the_command_still_exits_two(self):
+        jeu = subprocess.Popen(
+            [
+                sys.executable,
+                str(DECK_DIR / "deck_lock.py"),
+                "game",
+                "sleep",
+                "30",
+            ],
+            env=self.environ,
+        )
+        self.addCleanup(jeu.wait, 10)
+        self.addCleanup(jeu.kill)
+        self.attendre_le_jeu(jeu)
+        fini = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                PRENDRE.format(fonction="acquire_or_exit"),
+                str(DECK_DIR),
+                "tiler",
+                self.chemin,
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(2, fini.returncode, fini.stderr)
+        self.assertIn("game (PID %d)" % jeu.pid, fini.stderr)
+
+    def attendre_le_jeu(self, jeu):
+        for _fois in range(100):
+            tenu = self.deck_lock.holder(self.chemin)
+            if tenu and tenu[:2] == (str(jeu.pid), "game"):
+                return
+            time.sleep(0.05)
+        self.fail("the lock was never taken as game")
+
+    def envelopper(self, *commande):
+        """L'enveloppe lancée sur `commande`, dans sa propre session : sans
+        terminal, aucun signal ne lui vient du terminal du lanceur de
+        tests."""
+        jeu = subprocess.Popen(
+            [
+                sys.executable,
+                str(DECK_DIR / "deck_lock.py"),
+                "game",
+                *commande,
+            ],
+            env=self.environ,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        self.addCleanup(jeu.wait, 10)
+        self.addCleanup(jeu.kill)
+        self.attendre_le_jeu(jeu)
+        return jeu
+
+    def lire_pid(self, marque):
+        for _fois in range(200):
+            try:
+                with open(marque, encoding="utf-8") as fh:
+                    texte = fh.read().strip()
+            except FileNotFoundError:
+                texte = ""
+            if texte:
+                return int(texte)
+            time.sleep(0.05)
+        self.fail("the game never wrote its PID")
+
+    def attendre_le_verrou_libre(self):
+        for _fois in range(200):
+            if self.deck_lock.holder(self.chemin) is None:
+                return
+            time.sleep(0.05)
+        self.fail("the lock is still held")
+
+    def test_holder_pids_names_the_whole_game(self):
+        """La diagnostic nomme chaque processus qui tient le deck : le PID
+        du verrou, l'enveloppe, peut être mort quand le jeu tourne encore."""
+        marque = os.path.join(self.run_dir, "jeu.pid")
+        jeu = self.envelopper(
+            "sh", "-c", 'echo $$ > "$0"; exec sleep 30', marque
+        )
+        pid = self.lire_pid(marque)
+        self.assertEqual(
+            [jeu.pid, pid], self.deck_lock.holder_pids(self.chemin)
+        )
+
+    def test_a_signal_reaches_a_game_under_a_shell(self):
+        """La galerie lance « bash -c '<boucle>' » : le jeu est un
+        petit-enfant de l'enveloppe, et un shell non interactif meurt sur
+        SIGTERM ou SIGINT sans le passer. L'enveloppe le passe à tous ses
+        descendants et ne sort qu'après leur fin : le service relancé ensuite
+        ne trouve plus le jeu sur le deck. « ; : » empêche sh de remplacer
+        son processus par la commande, ce qui cacherait le petit-enfant."""
+        for signum in (signal.SIGTERM, signal.SIGINT):
+            with self.subTest(signal=signum.name):
+                marque = os.path.join(self.run_dir, "%s.pid" % signum.name)
+                jeu = self.envelopper(
+                    "sh",
+                    "-c",
+                    'sh -c \'echo $$ > "$0"; exec sleep 30\' "$0"; :',
+                    marque,
+                )
+                pid = self.lire_pid(marque)
+                self.addCleanup(tuer, pid)
+                jeu.send_signal(signum)
+                self.assertEqual(128 + signum, jeu.wait(10))
+                self.assertFalse(vivant(pid), "the game outlived its wrapper")
+                self.assertIsNone(self.deck_lock.holder(self.chemin))
+
+    def test_a_stopped_game_still_ends_on_sigterm(self):
+        """Un processus arrêté (état T) garde SIGTERM en suspens : l'enveloppe
+        lui envoie aussi SIGCONT, sans quoi elle attendrait sa fin pour
+        toujours."""
+        marque = os.path.join(self.run_dir, "jeu.pid")
+        jeu = self.envelopper(
+            "sh", "-c", 'echo $$ > "$0"; exec sleep 30', marque
+        )
+        pid = self.lire_pid(marque)
+        self.addCleanup(tuer, pid)
+        os.kill(pid, signal.SIGSTOP)
+        for _fois in range(100):
+            if self.deck_lock.process_table().get(pid, "....")[3] == "T":
+                break
+            time.sleep(0.05)
+        else:
+            self.fail("the game never stopped")
+        jeu.send_signal(signal.SIGTERM)
+        self.assertEqual(128 + signal.SIGTERM, jeu.wait(10))
+        self.assertFalse(vivant(pid), "the game outlived its wrapper")
+
+    def test_a_deck_program_that_lost_the_lock_takes_it_over(self):
+        """Un programme du deck lancé par un subprocess python (close_fds) n'a
+        pas hérité du verrou : il tourne sous celui du jeu, son ancêtre, et
+        le reprend à son nom dès que le jeu le rend."""
+        lancer = (
+            "import subprocess, sys;"
+            " p = subprocess.Popen(sys.argv[1:], stdout=subprocess.PIPE,"
+            " stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL,"
+            " text=True);"
+            " assert p.stdout.readline() == 'pret\\n'; print(p.pid)"
+        )
+        fini = self.lancer(
+            "game",
+            sys.executable,
+            "-c",
+            lancer,
+            sys.executable,
+            "-c",
+            RESTER,
+            str(DECK_DIR),
+            "tiler",
+            self.chemin,
+        )
+        self.assertEqual(0, fini.returncode, fini.stderr)
+        programme = int(fini.stdout)
+        self.addCleanup(tuer, programme)
+        for _fois in range(200):
+            tenu = self.deck_lock.holder(self.chemin)
+            if tenu and tenu[:2] == (str(programme), "tiler"):
+                break
+            time.sleep(0.05)
+        else:
+            self.fail(
+                "the deck program never took the lock over: %s"
+                % (self.deck_lock.holder(self.chemin),)
+            )
+
+    def test_a_deck_program_that_inherited_the_lock_holds_it(self):
+        """Le verrou hérité suffit, même quand le PID que le verrou nomme
+        n'est plus un ancêtre (l'enveloppe tuée) : le programme tourne, et
+        le texte nomme encore le jeu."""
+        os.makedirs(os.path.dirname(self.chemin), mode=0o700)
+        tenu = open(self.chemin, "w", encoding="utf-8")
+        self.addCleanup(tenu.close)
+        tenu.write("4000000000 game\n")
+        tenu.flush()
+        fcntl.flock(tenu, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fini = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                PRENDRE.format(fonction="acquire_or_exit"),
+                str(DECK_DIR),
+                "tiler",
+                self.chemin,
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            pass_fds=(tenu.fileno(),),
+        )
+        self.assertEqual(0, fini.returncode, fini.stderr)
+        self.assertEqual("pret\n", fini.stdout)
+        self.assertEqual(
+            ("4000000000", "game", None), self.deck_lock.holder(self.chemin)
+        )
+
+    def test_a_deck_program_that_outlives_the_game_keeps_others_out(self):
+        """Un programme du deck lancé sous le jeu, qui lui survit, garde le
+        deck dès la sortie de l'enveloppe : par le descripteur hérité, ou
+        par le fil qui reprend le verrou. Un second programme lancé hors du
+        jeu sort en 2 au lieu de se superposer à lui."""
+        for close_fds in ("True", "False"):
+            with self.subTest(close_fds=close_fds):
+                lancer = (
+                    "import subprocess, sys;"
+                    " p = subprocess.Popen(sys.argv[1:],"
+                    " stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,"
+                    " stderr=subprocess.DEVNULL, text=True,"
+                    " close_fds=%s);"
+                    " assert p.stdout.readline() == 'pret\\n'; print(p.pid)"
+                    % close_fds
+                )
+                fini = self.lancer(
+                    "game",
+                    sys.executable,
+                    "-c",
+                    lancer,
+                    sys.executable,
+                    "-c",
+                    RESTER,
+                    str(DECK_DIR),
+                    "tiler",
+                    self.chemin,
+                )
+                self.assertEqual(0, fini.returncode, fini.stderr)
+                programme = int(fini.stdout)
+                self.addCleanup(tuer, programme)
+                second = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        PRENDRE.format(fonction="acquire_or_exit"),
+                        str(DECK_DIR),
+                        "controller",
+                        self.chemin,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(2, second.returncode, second.stdout)
+                self.assertEqual("", second.stdout)
+                tuer(programme)
+                self.attendre_le_verrou_libre()
+
+    def tenir_au_nom_du_jeu(self, texte):
+        """Le verrou tenu par ce processus, sur un descripteur que ses
+        enfants n'héritent pas, avec `texte`."""
+        os.makedirs(os.path.dirname(self.chemin), mode=0o700, exist_ok=True)
+        tenu = open(self.chemin, "w", encoding="utf-8")
+        self.addCleanup(tenu.close)
+        tenu.write(texte)
+        tenu.flush()
+        fcntl.flock(tenu, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return tenu
+
+    def test_a_reused_wrapper_pid_is_not_taken_for_the_game(self):
+        """Le verrou nomme une enveloppe morte dont le PID est repris par un
+        ancêtre du programme : l'instant de départ ne concorde pas, et le
+        programme sort en 2 au lieu de partager le deck. Un texte sans
+        instant de départ garde l'ancienne règle."""
+        moi = os.getpid()
+        for texte, code in (
+            ("%d game %d\n" % (moi, int(debut(moi)) + 1), 2),
+            ("%d game %s\n" % (moi, debut(moi)), 0),
+            ("%d game\n" % moi, 0),
+        ):
+            with self.subTest(texte=texte), self.tenir_au_nom_du_jeu(texte):
+                fini = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        PRENDRE.format(fonction="acquire_or_exit"),
+                        str(DECK_DIR),
+                        "tiler",
+                        self.chemin,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(code, fini.returncode, fini.stderr)
+
+    def test_two_deck_programs_in_one_game_exclude_each_other(self):
+        """Deux programmes du deck lancés dans un même jeu, par le
+        descripteur hérité ou sans lui : le second trouve deck.inner tenu
+        et sort en 2 en nommant le premier."""
+        lancer = (
+            "import subprocess, sys;"
+            " cf = sys.argv[1] == 'True';"
+            " py, rester, prendre, dossier, chemin = sys.argv[2:];"
+            " p = subprocess.Popen([py, '-c', rester, dossier, 'tiler',"
+            " chemin], stdout=subprocess.PIPE, stdin=subprocess.DEVNULL,"
+            " close_fds=cf, text=True);"
+            " assert p.stdout.readline() == 'pret\\n';"
+            " s = subprocess.run([py, '-c', prendre, dossier, 'controller',"
+            " chemin], stdin=subprocess.DEVNULL, capture_output=True,"
+            " close_fds=cf, text=True);"
+            " p.kill(); p.wait();"
+            " print(s.returncode, p.pid, s.stdout.strip(), s.stderr)"
+        )
+        for close_fds in ("True", "False"):
+            with self.subTest(close_fds=close_fds):
+                fini = self.lancer(
+                    "game",
+                    sys.executable,
+                    "-c",
+                    lancer,
+                    close_fds,
+                    sys.executable,
+                    RESTER,
+                    PRENDRE.format(fonction="acquire_or_exit"),
+                    str(DECK_DIR),
+                    self.chemin,
+                )
+                self.assertEqual(0, fini.returncode, fini.stderr)
+                code, premier, reste = fini.stdout.split(" ", 2)
+                self.assertEqual("2", code, reste)
+                self.assertIn("tiler (PID %s)" % premier, reste)
+                self.attendre_le_verrou_libre()
+
+    def test_deck_programs_one_after_the_other_in_a_game_run(self):
+        """deck.inner part avec le programme qui le tient : la boucle de la
+        galerie relance le tiler autant de fois qu'on veut."""
+        prendre = PRENDRE.format(fonction="acquire_or_exit")
+        fini = self.lancer(
+            "game",
+            "sh",
+            "-c",
+            '"$@"; "$@"',
+            "sh",
+            sys.executable,
+            "-c",
+            prendre,
+            str(DECK_DIR),
+            "tiler",
+            self.chemin,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(0, fini.returncode, fini.stderr)
+        self.assertEqual("pret\npret\n", fini.stdout)
+
+    def test_a_wrapper_inside_a_game_leaves_the_inner_lock_free(self):
+        """deck_lock.py game lancé dans un jeu n'est pas un programme du
+        deck : il ne prend pas deck.inner, et le tiler qu'il lance tourne."""
+        fini = self.lancer(
+            "game",
+            sys.executable,
+            str(DECK_DIR / "deck_lock.py"),
+            "game",
+            sys.executable,
+            "-c",
+            PRENDRE.format(fonction="acquire_or_exit"),
+            str(DECK_DIR),
+            "tiler",
+            self.chemin,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertEqual(0, fini.returncode, fini.stderr)
+        self.assertEqual("pret\n", fini.stdout)
+
+    def test_the_inner_lock_never_blocks_outside_a_game(self):
+        """Hors jeu, le verrou se prend sans regarder deck.inner, fût-il
+        tenu."""
+        interieur = os.path.join(os.path.dirname(self.chemin), "deck.inner")
+        os.makedirs(os.path.dirname(self.chemin), mode=0o700)
+        tenu = open(interieur, "w", encoding="utf-8")
+        self.addCleanup(tenu.close)
+        fcntl.flock(tenu, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fini = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                PRENDRE.format(fonction="acquire_or_exit"),
+                str(DECK_DIR),
+                "tiler",
+                self.chemin,
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(0, fini.returncode, fini.stderr)
+
+    def test_the_inner_lock_is_created_private(self):
+        """deck.inner se crée en 0600, quel que soit le umask du jeu :
+        un autre compte ne le lit ni ne le tient."""
+        fini = self.lancer(
+            "game",
+            sys.executable,
+            "-c",
+            PRENDRE.format(fonction="acquire_or_exit"),
+            str(DECK_DIR),
+            "tiler",
+            self.chemin,
+            stdin=subprocess.DEVNULL,
+            umask=0o022,
+        )
+        self.assertEqual(0, fini.returncode, fini.stderr)
+        interieur = os.path.join(os.path.dirname(self.chemin), "deck.inner")
+        self.assertEqual(0o600, os.stat(interieur).st_mode & 0o777)
+
+    def test_a_symlinked_inner_lock_is_refused_and_its_target_kept(self):
+        """Un lien posé à la place de deck.inner n'est pas suivi : le
+        programme du deck ne tourne pas, et le fichier que le lien désigne
+        garde son contenu."""
+        dossier = os.path.dirname(self.chemin)
+        os.makedirs(dossier, mode=0o700)
+        cible = os.path.join(self.run_dir, "cible")
+        with open(cible, "w", encoding="utf-8") as fh:
+            fh.write("exemple\n")
+        os.symlink(cible, os.path.join(dossier, "deck.inner"))
+        fini = self.lancer(
+            "game",
+            sys.executable,
+            "-c",
+            PRENDRE.format(fonction="acquire_or_exit"),
+            str(DECK_DIR),
+            "tiler",
+            self.chemin,
+            stdin=subprocess.DEVNULL,
+        )
+        self.assertNotEqual(0, fini.returncode)
+        self.assertEqual("", fini.stdout)
+        with open(cible, encoding="utf-8") as fh:
+            self.assertEqual("exemple\n", fh.read())
+
+    def test_a_child_of_a_deck_program_does_not_keep_the_inner_lock(self):
+        """deck.inner part avec son programme : un enfant que le programme
+        du deck laisse derrière lui, lancé sans fermer ses descripteurs,
+        n'écarte pas le programme du deck suivant du même jeu."""
+        for close_fds in ("True", "False"):
+            with self.subTest(close_fds=close_fds):
+                fini = self.lancer(
+                    "game",
+                    sys.executable,
+                    "-c",
+                    APRES_UN_ENFANT,
+                    close_fds,
+                    sys.executable,
+                    LAISSER_UN_ENFANT,
+                    PRENDRE.format(fonction="acquire_or_exit"),
+                    str(DECK_DIR),
+                    self.chemin,
+                )
+                self.assertEqual(0, fini.returncode, fini.stderr)
+                self.assertEqual("vivant 0 pret", fini.stdout.strip())
+                self.attendre_le_verrou_libre()
+
+    def test_sigterm_to_the_wrapper_ends_the_game(self):
+        """« kill <pid> », que la diagnostic propose quand un jeu tient le
+        deck, vise l'enveloppe : elle passe SIGTERM au jeu et sort avec son
+        code."""
+        jeu = subprocess.Popen(
+            [
+                sys.executable,
+                str(DECK_DIR / "deck_lock.py"),
+                "game",
+                "sleep",
+                "30",
+            ],
+            env=self.environ,
+        )
+        self.addCleanup(jeu.kill)
+        self.attendre_le_jeu(jeu)
+        jeu.send_signal(signal.SIGTERM)
+        self.assertEqual(128 + signal.SIGTERM, jeu.wait(10))
+        self.assertIsNone(self.deck_lock.holder(self.chemin))
 
 
 # Un programme du deck réduit à son nettoyage : argv = dossier du module,
@@ -357,6 +1041,48 @@ try:
 finally:
     noter("finally")
 """
+
+
+class LesCiblesDuSignal(unittest.TestCase):
+    """signal_targets() sur une table écrite à la main : 10 est l'enveloppe,
+    11 le shell de la galerie, 12 le jeu, 13 un zombie, 14 un processus d'un
+    autre groupe, 20 un étranger. Le groupe 10 est au premier plan de son
+    terminal, le groupe 14 non."""
+
+    TABLE = {
+        10: (1, 10, 10, "S"),
+        11: (10, 10, 10, "S"),
+        12: (11, 10, 10, "S"),
+        13: (11, 10, 10, "Z"),
+        14: (12, 14, 10, "S"),
+        20: (1, 20, 20, "S"),
+    }
+
+    def test_sigterm_reaches_every_live_descendant(self):
+        self.assertEqual(
+            [11, 12, 14],
+            charger().signal_targets(signal.SIGTERM, 10, self.TABLE),
+        )
+
+    def test_sigint_spares_the_terminal_foreground(self):
+        """Un Ctrl-C a déjà frappé le groupe au premier plan : seul le
+        processus d'un autre groupe le reçoit de l'enveloppe."""
+        self.assertEqual(
+            [14], charger().signal_targets(signal.SIGINT, 10, self.TABLE)
+        )
+
+    def test_without_a_terminal_sigint_reaches_everyone(self):
+        table = {
+            pid: (p, g, -1, e) for pid, (p, g, _t, e) in self.TABLE.items()
+        }
+        self.assertEqual(
+            [11, 12, 14],
+            charger().signal_targets(signal.SIGINT, 10, table),
+        )
+
+    def test_the_live_table_finds_this_process(self):
+        table = charger().process_table()
+        self.assertEqual(os.getppid(), table[os.getpid()][0])
 
 
 class SigtermPropre(unittest.TestCase):

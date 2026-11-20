@@ -1,6 +1,6 @@
 # Contract between the deck program and ERPLibre
 
-**Contract version: 1.0**
+**Contract version: 1.1**
 
 The deck program runs on its own (see `README.md`). ERPLibre also clones
 this repository at `script/stream_deck/deck/`, by Google Repo or by
@@ -122,6 +122,23 @@ deck flashes ERR, and key 0 of the controller prints a line.
    `acquire(program, path=None)` (raises `DeckBusy`),
    `acquire_or_exit(program, path=None)` and `exit_on_sigterm()` (SIGTERM
    raises `SigtermExit(143)`).
+
+   **Hand-over to a game.** `python3 -I deck_lock.py <program> <command>
+   [arguments…]`, standard library only, takes the lock as `<program>`
+   (`game` for ERPLibre's hand-over), runs the command as a child that
+   inherits the lock's descriptor, passes SIGTERM and SIGINT to all its
+   descendants (SIGINT spares those in the foreground of their terminal)
+   and waits for them, ignores SIGHUP, and exits with the command's code,
+   128 + N when signal N killed it; 2 when the deck is held, 1 when the
+   lock does not open, 127 or 126 when the command is missing or does not
+   run. The deck stays held while a process of the game keeps the
+   descriptor. A deck program started inside the game runs under that
+   lock, through the inherited descriptor or, without it, when an
+   ancestor holds the lock as `game` with the start time the text names
+   (`acquire()` then returns `None` and takes the lock over when the game
+   gives it back); two deck programs inside one game exclude each other
+   through `deck.inner`, next to the lock, the second exiting with
+   `BUSY_EXIT` and naming the first.
 6. **Settings, `streamdeck.conf`.** At each start the deck reads, through
    ERPLibre's settings library (see What the deck relies on),
    `DECK_PLUGINS_OFF`, the comma-separated ids of the plugins not

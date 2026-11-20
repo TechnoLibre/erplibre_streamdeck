@@ -6,4 +6,4 @@ CONTRACT_VERSION is the MAJOR.MINOR version of CONTRACT.md, the entry
 points, files and settings ERPLibre and the GNOME extension rely on.
 Importing the package imports nothing else."""
 
-CONTRACT_VERSION = "1.0"
+CONTRACT_VERSION = "1.1"

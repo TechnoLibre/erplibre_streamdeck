@@ -8,6 +8,13 @@ version that matters to ERPLibre and the GNOME extension is the one of
 ## [Unreleased]
 
 ### Added
+- `deck_lock.py` runs as a command, `python3 -I deck_lock.py <program>
+  <command> [arguments…]`: it holds the deck lock while the command and
+  every process that inherits the lock run, passes SIGTERM and SIGINT to
+  them and exits with the command's code. A deck program started inside
+  such a game runs under its lock, and a second one exits with code 2
+  (`deck.inner`); contract 1.1. ERPLibre's hand-over from the deck
+  service to a game runs it as `game`.
 - The deck program, its controller, its lock and its translator as a
   repository of their own, with contract 1.0 (`CONTRACT.md`). ERPLibre
   clones it at `script/stream_deck/deck/`; until then they lived in
