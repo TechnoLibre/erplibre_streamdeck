@@ -205,7 +205,11 @@ binaire/paquet **et** les fichiers de modèle existent.
 
 Audit et install via les cibles make d'ERPLibre, depuis son checkout ;
 hors d'ERPLibre, lancer `python translator_doctor.py`, `python
-translator_test.py` et `python translator_stream.py` depuis ce dépôt :
+translator_test.py` et `python translator_stream.py` depuis ce dépôt.
+Ces outils ne nomment la cible make que dans un checkout ; seuls, ils
+renvoient aux pistes d'installation manuelle plus bas (et, pour ollama,
+à la section `LLM backends` de TRANSLATOR.md), les cibles étant celles
+d'ERPLibre :
 
 ```bash
 make streamdeck_translator_doctor             # voir ce qui manque

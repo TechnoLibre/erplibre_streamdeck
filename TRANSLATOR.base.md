@@ -235,7 +235,9 @@ and the model files exist.
 Audit and install via the make targets of ERPLibre, from its checkout;
 outside ERPLibre, run `python translator_doctor.py`, `python
 translator_test.py` and `python translator_stream.py` from this
-repository:
+repository. These tools name the make target only inside a checkout; on
+their own, they point at the manual install hints below (and at the
+`LLM backends` section for ollama), since the targets are ERPLibre's:
 
 ```bash
 make streamdeck_translator_doctor             # see what is missing
@@ -438,7 +440,11 @@ binaire/paquet **et** les fichiers de modèle existent.
 
 Audit et install via les cibles make d'ERPLibre, depuis son checkout ;
 hors d'ERPLibre, lancer `python translator_doctor.py`, `python
-translator_test.py` et `python translator_stream.py` depuis ce dépôt :
+translator_test.py` et `python translator_stream.py` depuis ce dépôt.
+Ces outils ne nomment la cible make que dans un checkout ; seuls, ils
+renvoient aux pistes d'installation manuelle plus bas (et, pour ollama,
+à la section `LLM backends` de TRANSLATOR.md), les cibles étant celles
+d'ERPLibre :
 
 ```bash
 make streamdeck_translator_doctor             # voir ce qui manque

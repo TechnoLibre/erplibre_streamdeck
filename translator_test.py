@@ -57,8 +57,8 @@ def main():
     backends = translator.detect_stt_backends()
     if not backends:
         print(
-            "No STT backend available. "
-            "Run: make streamdeck_translator_install_whisper"
+            "No STT backend available. Install one: "
+            + translator.install_hint("whisper")
         )
         sys.exit(1)
 

@@ -47,7 +47,7 @@ def main():
     else:
         _miss(
             "STT backend",
-            "make streamdeck_translator_install_whisper",
+            translator.install_hint("whisper"),
         )
 
     out = translator.detect_output_methods()
@@ -70,7 +70,7 @@ def main():
     else:
         _miss(
             "LLM backend",
-            "make streamdeck_translator_install_ollama",
+            translator.install_hint("ollama"),
         )
 
     pref = translator.llm_model_preference()

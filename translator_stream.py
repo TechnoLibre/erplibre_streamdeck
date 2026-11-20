@@ -108,7 +108,7 @@ def main():
         print(
             f"ggml-{size}.bin not found under "
             "~/.local/share/whisper.cpp/models/. Run "
-            f"WHISPER_MODEL={size} make streamdeck_translator_install_whisper",
+            + translator.install_hint("whisper", model_size=size),
             file=sys.stderr,
         )
         sys.exit(1)

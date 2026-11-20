@@ -201,7 +201,9 @@ and the model files exist.
 Audit and install via the make targets of ERPLibre, from its checkout;
 outside ERPLibre, run `python translator_doctor.py`, `python
 translator_test.py` and `python translator_stream.py` from this
-repository:
+repository. These tools name the make target only inside a checkout; on
+their own, they point at the manual install hints below (and at the
+`LLM backends` section for ollama), since the targets are ERPLibre's:
 
 ```bash
 make streamdeck_translator_doctor             # see what is missing

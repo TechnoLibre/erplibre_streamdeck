@@ -39,3 +39,10 @@ version that matters to ERPLibre and the GNOME extension is the one of
   `script/todo/source_todo.sh` from the checkout, whatever the current
   directory.
 - The speech-to-text guide is `TRANSLATOR.md` (formerly `gpt.md`).
+
+### Fixed
+- On their own, `translator_doctor.py`, `translator_test.py` and
+  `translator_stream.py` name the manual steps of `TRANSLATOR.md`, or
+  the whisper.cpp model download, instead of ERPLibre's make targets;
+  inside a checkout they name the target and the checkout to run it
+  from (`translator.install_hint()`).

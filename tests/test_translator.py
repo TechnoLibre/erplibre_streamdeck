@@ -15,6 +15,9 @@ one process.
 import importlib.util
 import json
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -427,6 +430,101 @@ class TestHistory(unittest.TestCase):
             ]}, f)
         entries = translator.load_history()
         self.assertEqual([e["text"] for e in entries], ["kept"])
+
+
+class TestInstallHint(unittest.TestCase):
+    """install_hint names ERPLibre's make target only inside a checkout;
+    on its own, the deck points at TRANSLATOR.md or the download."""
+
+    def test_checkout_gives_the_make_target_and_where(self):
+        self.assertEqual(
+            translator.install_hint("whisper", repo_root="/erp"),
+            "make streamdeck_translator_install_whisper (from /erp)",
+        )
+        self.assertEqual(
+            translator.install_hint("ollama", repo_root="/erp"),
+            "make streamdeck_translator_install_ollama (from /erp)",
+        )
+        self.assertEqual(
+            translator.install_hint(
+                "whisper", model_size="base", repo_root="/erp"
+            ),
+            "WHISPER_MODEL=base make streamdeck_translator_install_whisper"
+            " (from /erp)",
+        )
+
+    def test_standalone_names_the_manual_steps(self):
+        doc = str(TRANSLATOR.with_name("TRANSLATOR.md"))
+        for layer, section in (
+            ("whisper", "STT backends"),
+            ("ollama", "LLM backends"),
+        ):
+            hint = translator.install_hint(layer, repo_root=None)
+            self.assertNotIn("make ", hint)
+            self.assertEqual(
+                hint, f'manual steps in {doc}, section "{section}"'
+            )
+
+    def test_standalone_model_size_is_the_download_command(self):
+        self.assertEqual(
+            translator.install_hint(
+                "whisper", model_size="small", repo_root=None
+            ),
+            "bash ~/.local/share/whisper.cpp/models/download-ggml-model.sh"
+            " small",
+        )
+
+    def test_every_section_named_is_a_heading_of_the_doc(self):
+        base = TRANSLATOR.with_name("TRANSLATOR.base.md").read_text(
+            encoding="utf-8"
+        )
+        for _target, section in translator.INSTALL_STEPS.values():
+            self.assertIn(f"### {section}\n", base)
+
+    def test_the_tools_ask_install_hint_for_every_make_target(self):
+        for name in (
+            "translator_doctor.py",
+            "translator_stream.py",
+            "translator_test.py",
+        ):
+            text = TRANSLATOR.with_name(name).read_text(encoding="utf-8")
+            self.assertNotIn("make streamdeck_translator_install", text)
+            self.assertIn("translator.install_hint(", text)
+
+    def test_default_reads_the_location_of_the_copy(self):
+        """A copy outside any checkout is standalone; ERPLIBRE_ROOT makes
+        it ERPLibre's, as paths.erplibre_root() decides."""
+        with tempfile.TemporaryDirectory() as tmp:
+            deck = Path(tmp, "elsewhere")
+            (deck / "erplibre_streamdeck").mkdir(parents=True)
+            root = TRANSLATOR.parent
+            for rel in (
+                "translator.py",
+                "erplibre_streamdeck/__init__.py",
+                "erplibre_streamdeck/paths.py",
+            ):
+                shutil.copy(root / rel, deck / rel)
+            code = (
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "import translator; print(translator.install_hint('whisper'))"
+            )
+            env = {
+                k: v for k, v in os.environ.items() if k != "ERPLIBRE_ROOT"
+            }
+            alone = subprocess.run(
+                [sys.executable, "-I", "-c", code, str(deck)],
+                env=env, capture_output=True, text=True, check=True,
+            ).stdout
+            self.assertIn(str(deck / "TRANSLATOR.md"), alone)
+            env["ERPLIBRE_ROOT"] = tmp
+            inside = subprocess.run(
+                [sys.executable, "-I", "-c", code, str(deck)],
+                env=env, capture_output=True, text=True, check=True,
+            ).stdout
+            self.assertEqual(
+                inside.strip(),
+                f"make streamdeck_translator_install_whisper (from {tmp})",
+            )
 
 
 if __name__ == "__main__":

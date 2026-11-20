@@ -923,3 +923,44 @@ def output_text(text, method):
             print(f"clipboard output error: {e}")
             return False
     return False
+
+
+# ---------- Install hints ----------
+
+# Each layer the translator tools can find missing: the make target of
+# an ERPLibre checkout that installs it, and the TRANSLATOR.md section
+# that gives the same steps by hand. The targets live in ERPLibre's make
+# fragment only; a deck running on its own has none of them.
+INSTALL_STEPS = {
+    "whisper": ("streamdeck_translator_install_whisper", "STT backends"),
+    "ollama": ("streamdeck_translator_install_ollama", "LLM backends"),
+}
+_FROM_PATHS = object()
+
+
+def install_hint(layer, model_size="", repo_root=_FROM_PATHS):
+    """How to install one layer of INSTALL_STEPS, as one line of text.
+
+    Inside an ERPLibre checkout (repo_root not None), the make target to
+    run from that checkout, with WHISPER_MODEL=<model_size> in front when
+    a size is given. On its own, the TRANSLATOR.md section of this
+    repository that holds the manual steps; for a whisper model size, the
+    download command of whisper.cpp itself. repo_root defaults to
+    erplibre_streamdeck.paths.REPO_ROOT, imported at call time: the
+    translator tools put this directory on sys.path first."""
+    if repo_root is _FROM_PATHS:
+        from erplibre_streamdeck import paths
+
+        repo_root = paths.REPO_ROOT
+    target, section = INSTALL_STEPS[layer]
+    if repo_root is not None:
+        size = f"WHISPER_MODEL={model_size} " if model_size else ""
+        return f"{size}make {target} (from {repo_root})"
+    if layer == "whisper" and model_size:
+        return (
+            "bash ~/.local/share/whisper.cpp/models/download-ggml-model.sh "
+            f"{model_size}"
+        )
+    doc = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       "TRANSLATOR.md")
+    return f'manual steps in {doc}, section "{section}"'
