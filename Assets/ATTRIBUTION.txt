@@ -1,0 +1,24 @@
+Files of this directory and their licenses
+==========================================
+
+Drawn by draw_assets.py, at the root of this repository:
+AGPL-3.0-or-later, like the rest of the repository. Run the script again
+to redraw them.
+
+- Released.png, Pressed.png, PressedMoved.png, Exit.png
+- Setting.gif, light-bulb.gif
+
+Third-party files, kept with their own license (compatible with
+AGPL-3.0-or-later):
+
+- Harold.jpg
+
+	Source/Author:	Dean Camera, python-elgato-streamdeck
+	License:	CC0 1.0 (public domain dedication), LICENSE-CC0-1.0.txt
+	URL:		https://github.com/abcminiuser/python-elgato-streamdeck
+
+- Roboto-Regular.ttf
+
+	Source/Author:	Roboto font by Google
+	License:	Apache License 2.0, LICENSE-Apache-2.0.txt
+	URL:		https://fonts.google.com/specimen/Roboto
