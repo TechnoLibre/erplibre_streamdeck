@@ -16,12 +16,17 @@ et l'extension GNOME dépendent.
 ## Installer
 
 La bibliothèque Stream Deck parle au deck par hidapi, et le deck demande
-une règle udev pour s'ouvrir sans root. Sur Debian et Ubuntu :
+une règle udev pour s'ouvrir sans root ; `wmctrl` sert la touche 3 du
+contrôleur. Dans ERPLibre, sauter ce bloc : `install_erplibre_home.sh
+--stream-deck` installe les mêmes paquets et gère sa propre règle,
+`70-streamdeck.rules`, qui démarre aussi le service du deck quand un deck
+est branché. Seul, sur Debian et Ubuntu, la règle va dans un fichier à
+son propre nom, que l'installateur d'ERPLibre n'écrase ni ne retire :
 
 
 ```bash
-sudo apt install -y libudev-dev libusb-1.0-0-dev libhidapi-libusb0 python3-venv
-sudo tee /etc/udev/rules.d/70-streamdeck.rules << 'RULES'
+sudo apt install -y libudev-dev libusb-1.0-0-dev libhidapi-libusb0 python3-venv wmctrl
+sudo tee /etc/udev/rules.d/70-streamdeck-standalone.rules << 'RULES'
 SUBSYSTEM=="usb", ATTRS{idVendor}=="0fd9", TAG+="uaccess"
 KERNEL=="hidraw*", ATTRS{idVendor}=="0fd9", TAG+="uaccess"
 RULES
