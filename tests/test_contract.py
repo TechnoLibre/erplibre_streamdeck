@@ -149,7 +149,7 @@ class ErplibreRootTest(unittest.TestCase):
 
     def test_any_other_location_runs_on_its_own(self):
         for deck in (
-            Path("/x/erplibre-streamdeck"),
+            Path("/x/erplibre_streamdeck"),
             Path("/x/script/stream_deck"),
             Path("/x/stream_deck/deck"),
             Path("/x/script/streamdeck/deck"),

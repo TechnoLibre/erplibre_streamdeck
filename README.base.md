@@ -78,8 +78,8 @@ commande plus bas se lance depuis la racine du dépôt, sous ce venv :
 <!-- [common] -->
 
 ```bash
-git clone https://github.com/TechnoLibre/erplibre-streamdeck.git
-cd erplibre-streamdeck
+git clone https://github.com/TechnoLibre/erplibre_streamdeck.git
+cd erplibre_streamdeck
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
 .venv/bin/python erplibre_streamdeck
