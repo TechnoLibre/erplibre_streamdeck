@@ -19,7 +19,7 @@ encore. Le fichier reste en place après le détenteur, et seul le flock dit
 si le deck est pris.
 
 Lancé en commande, le module tient le verrou pour un jeu, que la passation
-(erplibre_home_handover.sh) lance ainsi :
+(erplibre_home_streamdeck_handover.sh) lance ainsi :
 
     python3 deck_lock.py game <commande> [arguments…]
 
